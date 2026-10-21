@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spatialprompt"
+version = "0.1.0"
+description = "Text-promptable cell segmentation and phenotyping for spatial omics (SAM 3 + Muse Spark)"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "scipy",
+    "scikit-image",
+    "tifffile",
+    "pillow",
+    "pandas",
+    "pyarrow",
+]
+
+[project.scripts]
+spatialprompt-segment = "spatialprompt.segment:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
