@@ -13,7 +13,10 @@ reads first.
 
 - Started **2026-10-20**. Ten-day build window: target end-to-end demo by **2026-10-30**.
 - Day 1 done: data on disk, 5 ROIs extracted, Cellpose baseline scored (see Baseline).
-  Not a git repo yet (`git init` before the first commit; `data/` is gitignored).
+  Public repo: https://github.com/NickArmstrong04/spatialprompt (created 2026-10-26, MIT).
+  Commit `b37d4d5`, tag `pre-hackathon`, holds all Oct 20–21 work with its real author
+  date; everything after it is hackathon work. Keep that boundary honest: never backdate
+  or re-date commits. `data/`, `vendor/`, `.env` are gitignored.
 - Owner: Nick, computational biologist. The demo must run on data he actually works with.
 - Local machine: Windows 11, Python 3.13.5 (miniconda base), torch 2.9.1 + torchvision
   0.24.1 (CUDA build not yet confirmed), NVIDIA RTX 4070 Ti SUPER 16 GB, git 2.50.
