@@ -713,6 +713,79 @@ masks often miss IoU 0.5 against 10x), and the 125–200 swallowed nuclei per RO
 invisible to DAPI-only evidence. A Muse Spark planner can only choose among the same
 repairs, so do not expect it to change these numbers; its value is explaining and
 prioritising flags for a human, not raw F1. Overlay: `data/roi/roi01/overlay_sp_qc.png`.
+(Superseded in part by the MusePlanner result below: with crops, Muse *does* change the
+numbers, by rejecting bad flags rather than by finding new repairs.)
+
+### MusePlanner (built 2026-10-26, `src/spatialprompt/qc/muse_planner.py`, `bench/qc_check.py --planner muse`, `results/qc_check_muse.csv`, `results/qc_flags/`)
+
+Muse Spark 1.3 as a **triage judge over the detectors' proposals**, looking at each flagged cell:
+- Per flag a two-panel crop (40 µm field, 2× upscaled, 376×752 px): left DAPI grayscale, right
+  the R-boundary/B-DAPI composite; overlays = current cell outlines (yellow), the flagged DAPI
+  structure (green box), the flagged cell itself (cyan; doublet/empty). `empty` and `doublet`
+  rows now carry the cell bbox from `detect_all` for this.
+- 16 flags per call (one text line of numbers + one image each), `json_schema` answer
+  `{"decisions": [{flag_id, action ∈ add|split|drop|skip, confidence, reason ≤ 12 words}]}`,
+  reasoning effort "low", `max_tokens` 3000 (retry 6000). Accepted decisions (confidence ≥ 0.6)
+  become the same action dicts RulesPlanner emits; `drop` is applied only when Muse confirms it.
+  No tool calling: the Meta API supports `tool_choice: "auto"` only, so a call cannot be forced.
+- Everything run-specific stays out of the messages, so re-runs hit the cache. Decisions,
+  reasons and cost land in `qc_log_muse.json` (`log["planner"]`) and per flag in
+  `results/qc_flags/<roi>_muse.csv` joined to the 10x truth.
+- Budget estimator in `muse.py` counts an image part as a flat 400 tokens (its base64 would
+  otherwise be "budgeted" as ~24k tokens and trip the cap). `bench/qc_muse_smoke.py` runs one
+  call without loading SAM.
+- **The prompt is the whole game.** First prompt ("skip dim debris, be conservative") rejected
+  everything: 2/36 missed accepted, 0/12 doublets; its reasons were "dim haze, no bright
+  nucleus" on 15 of the 18 true misses it skipped, which is exactly what CLAUDE.md records
+  about the misses (dim nuclei), and "single lobulated nucleus" on true doublets (10x splits on
+  the 18S stain Muse cannot see). Recalibrated prompt (dim nucleus-sized blobs with their own
+  territory are cells; a 10x doublet looks like one bilobed DAPI region; "give the action you
+  believe") on the same 36 flags per kind: missed accept-precision 0.76, doublet 2/12 both
+  true, empty 0.65.
+
+roi01, all 287 flags (188 missed, 12 doublet, 87 empty), 18 calls, **$0.30**, 177 s:
+
+| kind | Muse accepted | accept-precision (rules = detector) | true flags kept | rejection-precision |
+|---|---|---|---|---|
+| missed | 93 / 188 | **0.68** (0.48) | 0.70 | 0.72 |
+| doublet | 3 / 12 | 0.67 (0.58) | 0.29 | 0.44 |
+| empty | 49 / 87 | **0.80** (0.56; rules never drops) | 0.80 | 0.74 |
+
+Cell F1 vs 10x: before 0.769 → **Muse 0.778** (P 0.80 R 0.76) vs RulesPlanner 0.770.
+Applied: 54 adds, 49 drops, 3 splits. The gain comes from *rejecting* half the missed flags and
+from drops, which were unusable without a judge.
+
+**Five ROIs, all flags, batch 16 (`results/qc_check_muse.csv`; rules numbers from
+`results/qc_check.csv`), 99 calls, $1.62, ~3.2 min per ROI (vs 30 s for rules):**
+
+| ROI | F1 before | rules | **Muse** | missed acc-P (det.) / kept | empty acc-P (det.) / kept | doublets accepted | calls / $ |
+|---|---|---|---|---|---|---|---|
+| roi01 | 0.769 | 0.770 | **0.778** | 0.68 (0.48) / 0.70 | 0.80 (0.56) / 0.80 | 3 / 12 | 18 / 0.30 |
+| roi02 | 0.741 | 0.746 | **0.763** | 0.73 (0.58) / 0.75 | 0.95 (0.77) / 0.90 | 1 / 5 | 22 / 0.36 |
+| roi03 | 0.731 | 0.735 | **0.743** | 0.65 (0.57) / 0.54 | 0.92 (0.72) / 0.84 | 3 / 12 | 17 / 0.28 |
+| roi04 | 0.691 | 0.693 | **0.712** | 0.67 (0.55) / 0.50 | 0.95 (0.81) / 0.97 | 2 / 17 | 24 / 0.39 |
+| roi05 | 0.694 | 0.695 | **0.705** | 0.78 (0.59) / 0.72 | 0.94 (0.66) / 0.75 | 1 / 6 | 18 / 0.28 |
+| **mean** | 0.725 | 0.728 | **0.740** (P 0.77 R 0.72) | 0.70 (0.55) / 0.64 | 0.91 (0.71) / 0.85 | 2 / 10 | 20 / 0.32 |
+
+- Muse beats RulesPlanner on **every** ROI (+0.008 to +0.017 over rules, +0.011 to +0.022
+  over no QC); precision rises 0.747 → 0.766 and recall 0.704 → 0.716. Rules only ever got
+  +0.003. Per ROI ~95 adds accepted of ~190 flags (≈ 55 applied), ~77 drops, 1–3 splits.
+- Where the gain comes from: (a) rejecting the ~45 % of missed flags that are not cells, so
+  the adds that go in are 70 % right instead of 55 %; (b) drops, which no planner could risk
+  before (detector precision 0.71) and which Muse confirms at 0.91 while keeping 85 % of the
+  true empties. Doublets remain out of reach (2 of ~10 flags accepted, and the detector's
+  recall is 0.03 anyway), as predicted: 10x splits on the 18S stain Muse is not shown.
+- Honest framing for the write-up: the judge improves the *decision quality* a lot (missed
+  0.55 → 0.70, empty 0.71 → 0.91) and F1 a little (+0.015), because F1 is bounded by the
+  repair primitive (box-prompted adds of dim nuclei often land below IoU 0.5 vs 10x) and by
+  the detectors' recall (0.27 for misses). The agentic story is real: detect → look → decide
+  with a reason → repair, and every decision is logged with its reason.
+- Cost/time: $0.32 and ~3 min per 2048² ROI at ~20 calls of 16 crops; reasoning is ~70 % of
+  output tokens. One roi04 batch hit `max_tokens` 3000 on reasoning and was retried at 6000.
+  Cached reruns are free. Possible phase 2 (not started): verify pass with id-based undo; an
+  18S panel in the crop for doublets; `reasoning_effort="minimal"` to halve cost.
+- Spend on the personal key after this: **$1.90** of the $2 agreed for this feature; do not
+  run more Muse jobs on it without asking. The hackathon key gets its own ledger.
 
 ## Figures and deck (2026-10-21)
 
@@ -731,7 +804,7 @@ prioritising flags for a human, not raw F1. Overlay: `data/roi/roi01/overlay_sp_
 | 3 | ~~SAM segmentation on ROIs; label image output; quick visual check~~ **done** (`cells_sp_*.tif`, `overlay_sp_*.png` per ROI). Freed day → start quantifier early. | overlay PNGs per ROI ✔ |
 | 4 | ~~Quantifier: transcripts → per-mask counts~~ **done 2026-10-21 (day 2)**: 96 % of cells within 10 % of 10x's counts on 10x's masks, r 0.997 (Quantifier section). | per-cell table matches 10x within tolerance ✔ `results/quantify_check.csv` |
 | 5 | ~~Query parser + phenotype gate~~ **built 2026-10-21 (day 2)** with a rules backend; "CD8+ T cells at the tumor boundary" → 39–48 cells lining the nest edges on roi01. **Open:** exercise the Muse Spark backend once `MODEL_API_KEY` is in `.env`, and compare its JSON to the rules output on ~10 queries. | ~~sensible subset; boundary filter works~~ ✔ (rules); Muse comparison pending key |
-| 6 | ~~QC agent: detectors as tools, repair loop with box re-prompts~~ **built 2026-10-21 (day 2)** with `RulesPlanner`: F1 0.725 → 0.728, safe on every ROI, missed-detector P 0.55 R 0.27, doublets undetectable from DAPI (QC agent section). **Open:** `MusePlanner` once a key exists; Muse Spark's role is prioritising/explaining flags, not raw F1. | before/after per ROI in `results/qc_check.csv` ✔; Muse loop pending key |
+| 6 | ~~QC agent: detectors as tools, repair loop with box re-prompts~~ **built 2026-10-21 (day 2)** with `RulesPlanner`: F1 0.725 → 0.728, safe on every ROI, missed-detector P 0.55 R 0.27, doublets undetectable from DAPI (QC agent section). ~~**Open:** `MusePlanner` once a key exists~~ **done 2026-10-26**: Muse judges each flag from a crop; roi01 F1 0.769 → 0.778 vs rules 0.770, missed accept-precision 0.48 → 0.68, drops usable (MusePlanner section). | before/after per ROI in `results/qc_check.csv` ✔; `results/qc_check_muse.csv` ✔ |
 | 7 | ~~TissueNet benchmark harness: Cellpose vs SAM 3.1, F1@0.5~~ **done 2026-10-21 (day 2)**: `bench/tissuenet_sam3.py`, SAM 0.690 vs Cellpose 0.854 on 1,324 test images, variants all worse (TissueNet subsection). | table ✔ `results/tissuenet_sam3_test.csv`; bar chart ✔ `results/figures/tissuenet_f1.png` |
 | 8 | Phenotype benchmark on Xenium; end-to-end CLI `query → outputs` | one command runs the whole loop on an ROI |
 | 9 | Demo polish: notebook/CLI walkthrough, figures, timing | demo runs cold in < 10 min |
@@ -760,13 +833,14 @@ meta_spatialomics/
     quantify.py         ✔ # quantify_transcripts / marker_table / intensity_table
     query.py            ✔ # parse_query: Muse Spark (Meta Model API) or rules backend → query dict
     gate.py             ✔ # gate: marker logic + spatial relation to a marker-defined region
-    qc/                 ✔ # detectors.py, repair.py, agent.py (QCAgent, RulesPlanner, MusePlanner stub)
+    muse.py             ✔ # chat(): Meta Model API client, disk cache, per-key spend ledger + hard cap
+    qc/                 ✔ # detectors.py, repair.py, agent.py (QCAgent, RulesPlanner), muse_planner.py (MusePlanner)
     quantify.py           # transcripts or intensities per mask
     query.py              # Muse Spark: plain English → structured query
     gate.py               # marker logic + spatial filters
     qc/                   # detectors.py (doublet/split), agent.py (Muse Spark loop + tools)
     cli.py                # `spatialprompt run --roi ... --query "..."`
-  bench/                  # tissuenet_f1.py, cellpose_baseline.py, phenotype_eval.py
+  bench/                ✔ # *_baseline / sam3_* / tissuenet_* / quantify_check / qc_check (+ qc_truth, qc_muse_smoke) / query_muse_vs_rules
   notebooks/              # demo walkthrough
   results/                # figures, tables, timings (small files committed)
   muse_sessions/          # copies of Muse Code JSONL logs for the write-up
@@ -786,8 +860,12 @@ meta_spatialomics/
 
 ## Open questions (resolve day 1–2, then record answers here)
 
-1. Does Muse Spark accept image input? Determines whether the QC agent sees crops or
-   only numeric features.
+1. ~~Does Muse Spark accept image input?~~ **Yes** (verified by calls 2026-10-26): Chat
+   Completions content parts `{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}`,
+   ≤ 50 images per request, ≤ 50 MB each, png/jpeg/gif/webp; cost scales with resolution
+   (docs: ~3 tokens at 1×1, ~1,400 at 1280 px; our 376×752 two-panel crops cost ~250–300).
+   `json_schema` structured output and 16 images in one request work together. The QC agent
+   sees crops (see MusePlanner).
 2. ~~Exact checkpoint loading call~~ `build_sam3_image_model()` loads sam3.pt; box
    prompts go through `Sam3Processor.add_geometric_prompt(box, label, state)` after a
    text prompt and are combined with it in the same forward pass.

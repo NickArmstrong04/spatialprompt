@@ -99,6 +99,27 @@ def _usage(u) -> tuple[int, int, int, int]:
             int(u.completion_tokens or 0), int(getattr(ctd, "reasoning_tokens", 0) or 0))
 
 
+IMAGE_TOKENS_EST = 400  # a 376x752 QC crop measures ~250-300 tokens; the docs say ~1,400 at 1280 px
+
+
+def estimate_input(messages: list[dict], tools: list | None = None) -> tuple[int, int]:
+    """(worst-case input tokens, number of images). Text at ~3 chars/token, which errs high; an
+    image_url part counts a flat IMAGE_TOKENS_EST instead of its base64 length (a 50 KB PNG is
+    70k chars, which would otherwise be 'budgeted' as 24k tokens and trip the cap)."""
+    n_tok, n_img = 50 + len(json.dumps(tools or [])) // 3, 0
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, str):
+            n_tok += len(c) // 3
+        elif isinstance(c, list):
+            for part in c:
+                if part.get("type") == "image_url":
+                    n_img += 1; n_tok += IMAGE_TOKENS_EST
+                else:
+                    n_tok += len(json.dumps(part)) // 3
+    return n_tok, n_img
+
+
 def billed_output(completion: int, reasoning: int) -> int:
     # completion_tokens already includes reasoning_tokens: ping on 2026-10-26 returned "OK" with
     # completion 23, reasoning 13, total 38 = prompt 15 + completion 23
@@ -124,7 +145,7 @@ def chat(messages: list[dict], *, model: str | None = None, reasoning_effort: st
         raise RuntimeError("MODEL_API_KEY not set (put it in .env at the repo root)")
     fp, cap = key_fingerprint(key), budget_usd()
     p_in, p_cached, p_out = prices(model)
-    est_in = len(json.dumps(messages)) // 3 + len(json.dumps(tools or [])) // 3 + 50  # ~3 chars/token, errs high
+    est_in, n_images = estimate_input(messages, tools)
     worst = (est_in * p_in + max_tokens * p_out) / 1e6
     so_far = spent(fp)
     if so_far + worst > cap:
@@ -147,7 +168,7 @@ def chat(messages: list[dict], *, model: str | None = None, reasoning_effort: st
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     hit.write_text(json.dumps(rec))
     _log(dict(ts=time.strftime("%Y-%m-%dT%H:%M:%S"), key=fp, model=model, tag=tag, hash=h, prompt=n_in, cached_prompt=n_cached,
-              completion=n_out, reasoning=n_reason, cost_usd=cost, sec=round(sec, 2)))
+              completion=n_out, reasoning=n_reason, n_images=n_images, cost_usd=cost, sec=round(sec, 2)))
     return {**rec, "cost_usd": cost, "cached": False}
 
 

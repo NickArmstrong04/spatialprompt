@@ -1,8 +1,9 @@
 """QC agent loop: detect -> plan -> repair -> re-detect.
 
-The planner decides which flags become which actions. `RulesPlanner` is deterministic and
-runs today; `MusePlanner` (Muse Spark via the Meta Model API, tool-calling) drops in behind the
-same interface once MODEL_API_KEY exists. Both receive the flag tables as data and return a
+The planner decides which flags become which actions. `RulesPlanner` is deterministic;
+`MusePlanner` (qc/muse_planner.py: Muse Spark looks at a crop of every flag) has the same
+interface. Both receive the flag tables as data plus a context dict (pixel size, round, seed
+boxes, and the rgb / cells / dapi / fg arrays for planners that render evidence) and return a
 list of action dicts; the loop executes them with qc.repair and records every step.
 
     agent = QCAgent(seg, planner=RulesPlanner())
@@ -48,14 +49,6 @@ class RulesPlanner:
         return acts[: self.max_actions]
 
 
-class MusePlanner:
-    """Placeholder for the Muse Spark planner: same interface, asks the model to choose actions
-    from the flag tables (as JSON) with a tool schema. Implemented when the API key is available."""
-
-    def plan(self, flags, context):  # pragma: no cover
-        raise NotImplementedError("MusePlanner needs MODEL_API_KEY; use RulesPlanner for now")
-
-
 def seed_boxes(seeds: np.ndarray) -> dict[int, tuple[int, int, int, int]]:
     out = {}
     for i, sl in enumerate(ndi.find_objects(np.asarray(seeds).astype(np.int64)), start=1):
@@ -90,7 +83,8 @@ class QCAgent:
         for r in range(rounds):
             flags = detectors.detect_all(cells, seeds, fg, pixel_size_um, fg_low=fg_low)
             summ = detectors.summarize(flags, len(np.unique(cells)) - 1)
-            acts = self.planner.plan(flags, dict(pixel_size_um=pixel_size_um, round=r, seed_box=sb))
+            acts = self.planner.plan(flags, dict(pixel_size_um=pixel_size_um, round=r, seed_box=sb,
+                                                 rgb=rgb, cells=cells, seeds=seeds, dapi=dapi, fg=fg))
             recs = []
             for a in acts:
                 if a["action"] == "drop":
@@ -111,13 +105,16 @@ class QCAgent:
                         win = seeds[y0:y1, x0:x1]; win[(win == 0) & fg[y0:y1, x0:x1]] = rec["new_id"]
                 else:
                     rec = dict(action=a["action"], ok=False, reason="unknown action")
+                rec["flag_id"] = a.get("flag_id")  # joins decision -> repair outcome in the bench
                 recs.append(rec)
             done = pd.DataFrame(recs) if recs else pd.DataFrame(columns=["action", "ok"])
             per = done.groupby("action").ok.agg(["count", "sum"]).rename(columns={"count": "planned", "sum": "applied"}).astype(int).to_dict("index") if len(done) else {}
-            log["rounds"].append(dict(round=r, flags=summ, actions=per, n_after=int(len(np.unique(cells)) - 1)))
+            log["rounds"].append(dict(round=r, flags=summ, actions=per, n_after=int(len(np.unique(cells)) - 1), repairs=recs))
             if not len(done) or not done.ok.any():
                 break
         log["n_after"] = int(len(np.unique(cells)) - 1); log["sec"] = time.time() - t0
+        if hasattr(self.planner, "log") and hasattr(self.planner, "summary"):
+            log["planner"] = dict(**self.planner.summary(), decisions=list(self.planner.log))
         return cells.astype(np.uint32), log
 
 

@@ -88,6 +88,14 @@ def detect_all(cells: np.ndarray, seeds: np.ndarray, fg: np.ndarray, pixel_size_
     doublet = pd.DataFrame(rows, columns=["cell", "blob", "area_px", "cy", "cx", "y0", "y1", "x0", "x1"])
     if len(doublet):  # one flag per cell: keep the largest extra blob
         doublet = doublet.sort_values("area_px", ascending=False).drop_duplicates("cell").reset_index(drop=True)
+    # bounding box of each cell, for the planner's crops (doublet rows carry the extra blob's box, which is
+    # too small to crop on; empty rows have no box at all)
+    objs = ndi.find_objects(cells)
+    def cell_box(c: int) -> tuple[int, int, int, int]:
+        sl = objs[int(c) - 1]
+        return (sl[0].start, sl[0].stop, sl[1].start, sl[1].stop) if sl is not None else (0, 0, 0, 0)
+    for col, i in zip(("cell_y0", "cell_y1", "cell_x0", "cell_x1"), range(4)):
+        doublet[col] = [cell_box(c)[i] for c in doublet.cell] if len(doublet) else pd.Series(dtype=int)
     # empty: little DAPI foreground inside the cell
     ids = np.arange(1, cells.max() + 1)
     area = np.bincount(cells.ravel(), minlength=cells.max() + 1)[1:]
@@ -95,7 +103,9 @@ def detect_all(cells: np.ndarray, seeds: np.ndarray, fg: np.ndarray, pixel_size_
     present = area > 0
     frac = np.where(present, fg_in / np.maximum(area, 1), 1.0)
     e = ids[present & (frac < empty_frac)]
-    empty = pd.DataFrame(dict(cell=e.astype(int), dapi_frac=frac[e - 1], area_px=area[e - 1].astype(int)))
+    boxes = np.array([cell_box(c) for c in e], dtype=int).reshape(-1, 4)
+    empty = pd.DataFrame(dict(cell=e.astype(int), dapi_frac=frac[e - 1], area_px=area[e - 1].astype(int),
+                              y0=boxes[:, 0], y1=boxes[:, 1], x0=boxes[:, 2], x1=boxes[:, 3]))
     # split: a compact blob shared by exactly two cells
     lab3, blobs3 = _blobs(fg, min_px)
     rows = []
