@@ -784,8 +784,12 @@ from drops, which were unusable without a judge.
   output tokens. One roi04 batch hit `max_tokens` 3000 on reasoning and was retried at 6000.
   Cached reruns are free. Possible phase 2 (not started): verify pass with id-based undo; an
   18S panel in the crop for doublets; `reasoning_effort="minimal"` to halve cost.
-- Spend on the personal key after this: **$1.90** of the $2 agreed for this feature; do not
-  run more Muse jobs on it without asking. The hackathon key gets its own ledger.
+- Spend after this: **$1.90** (ledger) / $1.77 (Meta's balance, $148.23 of the $150 hackathon
+  credit, which landed on this same key on 2026-10-26). **Spend policy (Nick, 2026-10-26): very
+  conservative until the product works end to end.** `.env` cap `MUSE_BUDGET_USD=4.00`
+  (raise deliberately, per job, after stating the estimate); `MUSE_OFFLINE=1` for rehearsals
+  (cache-only, $0); no new Muse evaluation runs (phase-2 ideas, more ROIs, prompt sweeps)
+  without asking first. A new demo query costs ~$0.005; a Muse QC pass on one ROI ~$0.32.
 
 ## Figures and deck (2026-10-21)
 

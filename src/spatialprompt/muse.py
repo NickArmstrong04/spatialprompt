@@ -11,7 +11,9 @@ Every Muse call in the package goes through `chat()`:
 
 Env, read from .env at the repo root: MODEL_API_KEY (or META_API_KEY), MUSE_MODEL (default
 muse-spark-1.3; the -contributor ids cost ~1/12 on input and ~1/20 on output, but Meta may train on
-those requests), MUSE_BUDGET_USD.
+those requests), MUSE_BUDGET_USD (hard cap per key, default $1), MUSE_OFFLINE=1 (cache-only: a
+request not in the cache raises MuseOffline instead of being sent; parse_query then falls back to
+the rules backend and MusePlanner skips the batch, so a rehearsal of the whole pipeline costs $0).
 
     python -m spatialprompt.muse            # spend so far per key
     python -m spatialprompt.muse --ping     # one minimal call: checks key, model id and usage fields
@@ -40,6 +42,10 @@ CONTRIBUTOR = (0.10, 0.002, 0.20)
 
 class BudgetExceeded(RuntimeError):
     pass
+
+
+class MuseOffline(RuntimeError):
+    """Raised on a cache miss when MUSE_OFFLINE=1: nothing is sent, nothing is billed."""
 
 
 def load_env() -> None:
@@ -139,6 +145,8 @@ def chat(messages: list[dict], *, model: str | None = None, reasoning_effort: st
     hit = CACHE_DIR / f"{h}.json"
     if use_cache and hit.exists():
         return {**json.loads(hit.read_text()), "cost_usd": 0.0, "cached": True}
+    if os.environ.get("MUSE_OFFLINE", "").strip() not in ("", "0", "false"):
+        raise MuseOffline(f"MUSE_OFFLINE is set and this request ({tag or 'untagged'}) is not in the cache")
 
     key = api_key()
     if not key:
