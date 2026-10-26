@@ -48,6 +48,14 @@ def marker_mask(counts: sparse.spmatrix, genes: np.ndarray, positive: list[list[
     return keep
 
 
+def region_mask(label: np.ndarray, region_labels: np.ndarray, pixel_size_um: float, close_um: float = 5.0) -> np.ndarray:
+    """Binary region = union of the region cells' masks, closed by close_um and hole-filled."""
+    inreg = np.isin(np.asarray(label), region_labels)
+    r = max(int(round(close_um / pixel_size_um)), 1)
+    inreg = ndi.binary_closing(inreg, structure=np.ones((2 * r + 1, 2 * r + 1), bool))
+    return ndi.binary_fill_holes(inreg)
+
+
 def signed_distance_to_region(label: np.ndarray, region_labels: np.ndarray, table: pd.DataFrame,
                               pixel_size_um: float, close_um: float = 5.0) -> np.ndarray:
     """Signed distance (um) from each cell centroid to the edge of the region formed by region_labels.
@@ -55,10 +63,7 @@ def signed_distance_to_region(label: np.ndarray, region_labels: np.ndarray, tabl
     lab = np.asarray(label)
     if len(region_labels) == 0:
         return np.full(len(table), np.inf)
-    inreg = np.isin(lab, region_labels)
-    r = max(int(round(close_um / pixel_size_um)), 1)
-    inreg = ndi.binary_closing(inreg, structure=np.ones((2 * r + 1, 2 * r + 1), bool))
-    inreg = ndi.binary_fill_holes(inreg)
+    inreg = region_mask(lab, region_labels, pixel_size_um, close_um)
     d_out = ndi.distance_transform_edt(~inreg) * pixel_size_um   # >0 outside
     d_in = ndi.distance_transform_edt(inreg) * pixel_size_um     # >0 inside
     yi = np.clip(table["y_px"].round().astype(int).to_numpy(), 0, lab.shape[0] - 1)
@@ -92,8 +97,8 @@ def gate(table: pd.DataFrame, counts: sparse.spmatrix, genes: np.ndarray, query:
         else:
             raise ValueError(f"unknown spatial relation {rel!r}")
         info.update(region=reg.get("name", "region"), n_region=int(in_region.sum()), relation=rel, distance_um=dist,
-                    n_spatial=int(s.sum()))
-        table = table.assign(dist_to_region_um=d)
+                    n_spatial=int(s.sum()), region_labels=table["label"].to_numpy()[in_region])
+        table = table.assign(dist_to_region_um=d, in_region=in_region)
         keep = keep & s
     info["n_keep"] = int(keep.sum())
     info["table"] = table

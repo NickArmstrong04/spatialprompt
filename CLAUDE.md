@@ -791,6 +791,47 @@ from drops, which were unusable without a judge.
   (cache-only, $0); no new Muse evaluation runs (phase-2 ideas, more ROIs, prompt sweeps)
   without asking first. A new demo query costs ~$0.005; a Muse QC pass on one ROI ~$0.32.
 
+## End-to-end CLI + phenotype benchmark (done 2026-10-26, day 8)
+
+`spatialprompt-run --roi data/roi/roi01 --query "CD8+ T cells at the tumor boundary" [--masks sam+muse]`
+(`src/spatialprompt/cli.py`; `python -m spatialprompt.cli` works too). Steps, each timed: masks
+(reused from the ROI dir: `--masks sam | sam+qc | sam+muse | 10x | cellpose`; `--fresh` recomputes
+SAM / QC, Segmenter loaded lazily) → quantify → parse (`--backend auto|muse|rules`) → gate →
+write `results/runs/<roi>_<query-slug>_<masks>/`: `query.json`, `cells.parquet` (every cell, the
+query's genes as columns, `marker_pass`, `keep`, `dist_to_region_um`, slide µm), `labels_query.tif`
+(kept cells only), `masks_query.geojson` (polygons in slide µm, Xenium frame, properties = the
+row), `overlay.png` (cyan region edge, magenta kept, yellow marker-positive not kept),
+`summary.json`. roi01 demo query on cached masks: **9 s, 40 cells of 2,318, $0** (parse cached).
+`results/runs/` is gitignored (24 MB per run); `results/figures/demo_overlay_roi01_cd8t_boundary.png`
+is the 1024 px copy. `MUSE_OFFLINE=1` makes the whole CLI zero-spend.
+
+**Phenotype benchmark** (`bench/phenotype_eval.py`, `results/phenotype_eval.csv`, 5 ROIs ×
+10 queries × 4 mask sets, no API calls: Muse parses from cache, uncached → rules).
+Reference = gate on 10x masks with 10x's own matrix; candidate kept cell matched to the 10x
+cell under its centroid; P/R/F1 of the kept sets. `10x-requant` = 10x masks + our quantifier.
+
+| query (reference cells / ROI) | 10x-requant | Cellpose | SAM | **SAM + Muse QC** |
+|---|---|---|---|---|
+| B cells (266) | 0.99 | 0.88 | 0.87 | **0.88** |
+| CD8+ T cells (71) | 0.98 | 0.82 | 0.83 | **0.83** |
+| CD8+ T cells at the tumor boundary (25) | 0.99 | 0.83 | 0.80 | **0.81** |
+| endothelial cells (111) | 0.98 | 0.78 | 0.76 | **0.78** |
+| macrophages (187) | 0.98 | 0.74 | 0.73 | **0.74** |
+| tumor cells (255) | 0.98 | 0.83 | 0.76 | **0.76** |
+
+- Quantification is not the bottleneck (0.98–0.99 on 10x's own masks); the gap is segmentation
+  agreement, and it tracks the mask F1 (Cellpose 0.78 > SAM+Muse 0.74 > SAM 0.725). SAM+Muse ≥
+  SAM on every query (+0.00 to +0.02). Precision is ~0.69 for SAM sets vs 0.73 Cellpose; recall
+  0.51 vs 0.67 over all queries (dragged down by the tiny-set rows below).
+- Rows with < 20 reference cells per ROI are not meaningful and are excluded above: "CD8+ T
+  inside the tumor" (1 cell: immune-excluded ROIs), "regulatory T cells near the tumor" (1),
+  "HER2+ tumor cells" (5), "proliferating tumor cells" (15). The last two expose a **schema
+  limit**: one `min_count` applies to every positive group, so Muse's "tumor signature ≥ 3 AND
+  ERBB2 ≥ 3" keeps ~5 cells per ROI. Fix = per-group thresholds (`{"genes": [...], "min_count": n}`
+  in `positive`), which changes the prompt and re-parses the 8 cached queries (~$0.05). **Pending
+  Nick's go-ahead (spend policy).**
+- Figure for the deck not yet made (do it with `bench/make_figures.py` on day 9).
+
 ## Figures and deck (2026-10-21)
 
 - `results/figures/`: `xenium_f1.png`, `tissuenet_f1.png`, `tissuenet_variants.png`,
@@ -810,7 +851,7 @@ from drops, which were unusable without a judge.
 | 5 | ~~Query parser + phenotype gate~~ **built 2026-10-21 (day 2)** with a rules backend; "CD8+ T cells at the tumor boundary" → 39–48 cells lining the nest edges on roi01. **Open:** exercise the Muse Spark backend once `MODEL_API_KEY` is in `.env`, and compare its JSON to the rules output on ~10 queries. | ~~sensible subset; boundary filter works~~ ✔ (rules); Muse comparison pending key |
 | 6 | ~~QC agent: detectors as tools, repair loop with box re-prompts~~ **built 2026-10-21 (day 2)** with `RulesPlanner`: F1 0.725 → 0.728, safe on every ROI, missed-detector P 0.55 R 0.27, doublets undetectable from DAPI (QC agent section). ~~**Open:** `MusePlanner` once a key exists~~ **done 2026-10-26**: Muse judges each flag from a crop; roi01 F1 0.769 → 0.778 vs rules 0.770, missed accept-precision 0.48 → 0.68, drops usable (MusePlanner section). | before/after per ROI in `results/qc_check.csv` ✔; `results/qc_check_muse.csv` ✔ |
 | 7 | ~~TissueNet benchmark harness: Cellpose vs SAM 3.1, F1@0.5~~ **done 2026-10-21 (day 2)**: `bench/tissuenet_sam3.py`, SAM 0.690 vs Cellpose 0.854 on 1,324 test images, variants all worse (TissueNet subsection). | table ✔ `results/tissuenet_sam3_test.csv`; bar chart ✔ `results/figures/tissuenet_f1.png` |
-| 8 | Phenotype benchmark on Xenium; end-to-end CLI `query → outputs` | one command runs the whole loop on an ROI |
+| 8 | ~~Phenotype benchmark on Xenium; end-to-end CLI `query → outputs`~~ **done 2026-10-26**: `spatialprompt-run` (9 s on cached masks, 6 outputs incl. GeoJSON); `bench/phenotype_eval.py` 5 ROIs × 10 queries (SAM+Muse F1 0.74–0.88 vs 10x on real populations; Cellpose +0.02–0.07). Open: per-group `min_count` in the query schema (~$0.05 to re-parse). | ~~one command runs the whole loop on an ROI~~ ✔ |
 | 9 | Demo polish: notebook/CLI walkthrough, figures, timing | demo runs cold in < 10 min |
 | 10 | Write-up, video/screens, buffer | submitted |
 

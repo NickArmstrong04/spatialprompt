@@ -19,6 +19,7 @@ dependencies = [
 
 [project.scripts]
 spatialprompt-segment = "spatialprompt.segment:main"
+spatialprompt-run = "spatialprompt.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
