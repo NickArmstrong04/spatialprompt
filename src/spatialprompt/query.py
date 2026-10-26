@@ -1,8 +1,8 @@
 """Query parser: plain English -> the structured query dict that gate.py consumes.
 
 Two backends:
-  * Muse Spark via the Meta Model API (OpenAI-SDK-compatible, base https://api.meta.ai/v1,
-    key in MODEL_API_KEY, read from .env). Used when the key is set and backend != "rules".
+  * Muse Spark via the Meta Model API, through spatialprompt.muse.chat (disk cache, per-key spend
+    cap, key in MODEL_API_KEY read from .env). Used when the key is set and backend != "rules".
   * A rules backend (no network) that covers the demo vocabulary so the pipeline runs end to
     end without the key and so Muse Spark's output has a reference to be checked against.
 
@@ -15,10 +15,8 @@ positive list falls back to the rules backend.
 from __future__ import annotations
 
 import json
-import os
 import re
 import warnings
-from pathlib import Path
 
 # ----------------------------------------------------------------------------- vocabulary
 
@@ -58,10 +56,44 @@ SCHEMA_DOC = """Return ONLY a JSON object with these keys:
   "negative": list of OR-groups the cell must have < 1 transcript of (may be empty),
   "min_count": integer (1 for immune markers, 3 for multi-gene epithelial signatures),
   "region": null or {"name": str, "positive": [...], "min_count": int} describing the reference tissue region,
-  "spatial": null or {"relation": one of "boundary","inside","outside","within", "distance_um": number},
+  "spatial": null or {"relation": one of "boundary","inside","outside","within", "distance_um": number}:
+     "boundary" = within distance_um of the region edge on either side, "within" = outside the region but within
+     distance_um of it ("near", "adjacent"), "inside"/"outside" ignore distance_um. Use 20 unless the query gives a distance,
   "sam_prompt": a short visual noun phrase for the segmenter, almost always "cell".
-Use only gene symbols from the provided panel. Prefer canonical markers: CD8 T = CD8A/CD8B and CD3E/CD3D;
-tumor (breast) = EPCAM, CDH1, ERBB2, ESR1, GATA3, FOXA1 with min_count 3; fibroblast = COL1A1, COL1A2, DCN, LUM."""
+Use only gene symbols on the panel; never use a marker listed as absent. Prefer canonical markers: CD8 T = CD8A/CD8B
+and CD3E/CD3D; tumor (breast) = EPCAM, CDH1, ERBB2, ESR1, GATA3, FOXA1 with min_count 3; fibroblast = DCN, LUM, PDGFRA.
+Put a qualifier such as HER2+, FOXP3+, exhausted or proliferating into the positive groups as its own group."""
+
+# canonical cell-type markers; the prompt lists which of these are on / absent from the panel, so the model
+# sees the relevant part of a 5,101-gene panel for ~600 tokens instead of the whole list
+MARKER_HINTS = """PTPRC CD3E CD3D CD3G CD2 CD5 CD7 CD8A CD8B CD4 FOXP3 IL2RA CTLA4 PDCD1 LAG3 HAVCR2 TIGIT TOX GZMA GZMB GZMK
+GZMH PRF1 NKG7 GNLY KLRD1 KLRB1 NCAM1 FCGR3A IL7R CCR7 SELL TCF7 MS4A1 CD19 CD79A CD79B CD22 PAX5 CR2 FCER2 JCHAIN MZB1
+SDC1 XBP1 IGKC IGHG1 CD38 CD68 CD163 CD14 CD86 CSF1R MRC1 ITGAM ITGAX LYZ C1QA C1QB APOE MARCO SPP1 CD1C CLEC9A CLEC10A
+LAMP3 IRF8 IRF4 CPA3 TPSAB1 KIT MS4A2 S100A8 S100A9 CSF3R FCGR3B CEACAM8 EPCAM CDH1 KRT8 KRT18 KRT19 KRT5 KRT14 KRT17
+KRT7 ERBB2 ESR1 PGR GATA3 FOXA1 AR ELF5 TP63 MKI67 TOP2A PCNA CCNB1 PECAM1 VWF CDH5 KDR CLDN5 PLVAP ACKR1 LYVE1 PROX1
+COL1A1 COL1A2 COL3A1 DCN LUM PDGFRA PDGFRB FAP POSTN THY1 ACTA2 TAGLN MYH11 DES CNN1 RGS5 MCAM VIM CXCL13 CXCL9 CXCL10
+CD274 IDO1 HLA-DRA""".split()
+
+_GROUPS = {"type": "array", "items": {"type": "array", "items": {"type": "string"}}}
+QUERY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "label": {"type": "string"},
+        "positive": _GROUPS,
+        "negative": _GROUPS,
+        "min_count": {"type": "integer"},
+        "region": {"type": ["object", "null"],
+                   "properties": {"name": {"type": "string"}, "positive": _GROUPS, "min_count": {"type": "integer"}},
+                   "required": ["name", "positive", "min_count"]},
+        "spatial": {"type": ["object", "null"],
+                    "properties": {"relation": {"type": "string", "enum": ["boundary", "inside", "outside", "within"]},
+                                   "distance_um": {"type": "number"}},
+                    "required": ["relation", "distance_um"]},
+        "sam_prompt": {"type": "string"},
+    },
+    "required": ["label", "positive", "negative", "min_count", "region", "spatial", "sam_prompt"],
+    "additionalProperties": False,
+}
 
 
 # ----------------------------------------------------------------------------- rules backend
@@ -117,40 +149,40 @@ def parse_rules(text: str) -> dict:
 
 # ----------------------------------------------------------------------------- Muse Spark backend
 
-def _load_env() -> None:
-    p = Path(__file__).resolve().parents[2] / ".env"
-    if p.exists():
-        for line in p.read_text().splitlines():
-            if "=" in line and not line.lstrip().startswith("#"):
-                k, v = line.split("=", 1); os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+def panel_note(panel: list[str] | None) -> str:
+    if not panel:
+        return "Panel: unknown; use canonical gene symbols."
+    ps = set(panel)
+    on = [g for g in MARKER_HINTS if g in ps]
+    off = [g for g in MARKER_HINTS if g not in ps]
+    return (f"Panel: {len(panel)} genes. Canonical markers ON the panel: {' '.join(on)}.\n"
+            f"ABSENT from the panel (never use): {' '.join(off)}.\n"
+            "Other gene symbols may be used if you are confident they are on a 5K pan-tissue panel; they are validated.")
 
 
-def muse_client():
-    """OpenAI-SDK client pointed at the Meta Model API. Raises if the key is missing."""
-    _load_env()
-    key = os.environ.get("MODEL_API_KEY") or os.environ.get("META_API_KEY")
-    if not key:
-        raise RuntimeError("MODEL_API_KEY not set (put it in .env)")
-    from openai import OpenAI
-    return OpenAI(api_key=key, base_url=os.environ.get("MODEL_API_BASE_URL", "https://api.meta.ai/v1"))
-
-
-def parse_muse(text: str, panel: list[str] | None, model: str | None = None) -> dict:
-    client = muse_client()
-    model = model or os.environ.get("MUSE_MODEL", "muse-spark-1.3")
-    panel_note = f"Panel genes (subset shown, {len(panel)} total): {', '.join(sorted(panel)[:400])}" if panel else "Panel: unknown."
-    msgs = [dict(role="system", content="You translate spatial-biology cell queries into a JSON gate specification.\n" + SCHEMA_DOC + "\n" + panel_note),
+def parse_muse(text: str, panel: list[str] | None, model: str | None = None, reasoning_effort: str = "low") -> dict:
+    """Muse Spark backend, through spatialprompt.muse.chat (disk cache + spend cap)."""
+    from spatialprompt.muse import chat
+    msgs = [dict(role="system", content="You translate spatial-biology cell queries into a JSON gate specification.\n"
+                 + SCHEMA_DOC + "\n" + panel_note(panel)),
             dict(role="user", content=text)]
-    r = client.chat.completions.create(model=model, messages=msgs, temperature=0, response_format={"type": "json_object"})
-    raw = r.choices[0].message.content
+    fmt = {"type": "json_schema", "json_schema": {"name": "gate_query", "schema": QUERY_SCHEMA}}
+    # max_tokens caps reasoning + JSON together; most queries reason ~1k tokens, but "exhausted CD8 T cells in
+    # the stroma" used 1.4k and was cut off before any JSON, so retry once with more room
+    for max_tokens in (1500, 4000):
+        out = chat(msgs, model=model, reasoning_effort=reasoning_effort, max_tokens=max_tokens, tag="parse_query",
+                   response_format=fmt)
+        if out["finish_reason"] != "length":
+            break
+    raw = out["content"] or ""
     try:
         q = json.loads(raw)
     except json.JSONDecodeError:
         m = re.search(r"\{.*\}", raw, re.S)
         q = json.loads(m.group(0)) if m else {}
     q.setdefault("label", text); q.setdefault("sam_prompt", "cell"); q.setdefault("min_count", 1)
-    q.setdefault("negative", []); q.setdefault("region", None); q.setdefault("spatial", None)
-    q["_raw"] = raw; q["_backend"] = model
+    q.setdefault("positive", []); q.setdefault("negative", []); q.setdefault("region", None); q.setdefault("spatial", None)
+    q["_raw"] = raw; q["_backend"] = out["model"]; q["_cost_usd"] = out["cost_usd"]; q["_cached"] = out["cached"]
     return q
 
 
@@ -180,16 +212,16 @@ def validate(q: dict, panel: list[str] | None) -> dict:
 
 def parse_query(text: str, panel: list[str] | None = None, backend: str = "auto") -> dict:
     """backend: "auto" (Muse Spark if MODEL_API_KEY is set, else rules), "muse", or "rules"."""
-    _load_env()
-    use_muse = backend == "muse" or (backend == "auto" and (os.environ.get("MODEL_API_KEY") or os.environ.get("META_API_KEY")))
+    from spatialprompt.muse import BudgetExceeded, api_key
+    use_muse = backend == "muse" or (backend == "auto" and api_key())
     if use_muse:
         try:
             q = validate(parse_muse(text, panel), panel)
-            if q["positive"] or "cell" in text.lower():
+            if q["positive"] or not parse_rules(text)["positive"]:  # empty markers only for a generic "all cells"
                 return q
             warnings.warn("Muse Spark returned no usable markers; falling back to rules")
         except Exception as e:  # noqa: BLE001
-            if backend == "muse":
+            if backend == "muse" or isinstance(e, BudgetExceeded):
                 raise
             warnings.warn(f"Muse Spark unavailable ({e}); using rules backend")
     q = validate(parse_rules(text), panel)

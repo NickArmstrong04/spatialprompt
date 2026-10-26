@@ -618,7 +618,30 @@ Validation on 10x's own masks (5 ROIs, ~2,400 cells each) vs 10x's cells.parquet
   when the key is set and falls back to the **rules backend** (vocabulary of 10 cell
   types, 3 regions, 4 spatial relations, µm distances, `GENE+`/`GENE-` syntax) otherwise.
   Muse output is validated against the panel (unknown genes dropped with a warning).
-  **Muse backend is untested until the key arrives.**
+- **Muse backend works (2026-10-26, personal key, `bench/query_muse_vs_rules.py`,
+  `results/query_muse_vs_rules.csv`).** 12 demo queries: same markers as rules on 3/12, same
+  region + relation on 11/12 (the 12th is only "vessels" vs "vessel"). Where they differ Muse
+  is better biology: Tregs → CD3 & CD4 & FOXP3, "HER2+" adds an ERBB2 group, "proliferating"
+  adds MKI67/TOP2A/PCNA/CCNB1, "exhausted CD8" adds (PDCD1|HAVCR2|LAG3|TIGIT|TOX), macrophage /
+  endothelial groups get CSF1R/MRC1 and CLDN5/KDR/PLVAP. It avoids genes listed as absent.
+  ~$0.005 per query on `muse-spark-1.3` (mostly ~1k reasoning tokens at effort "low").
+- **All Muse calls go through `spatialprompt.muse.chat`**: disk cache (`data/cache/muse/`),
+  per-key spend ledger (`data/logs/muse_usage.jsonl`, keyed by a sha256 fingerprint) and a
+  hard cap `MUSE_BUDGET_USD` checked against the worst case *before* sending. `python -m
+  spatialprompt.muse` prints spend; `--ping` makes a minimal call. `.env` holds
+  `MODEL_API_KEY`, `MUSE_BUDGET_USD`, `MUSE_MODEL`. Currently a **personal key**, budget $10;
+  the Meta hackathon key ($150 credits) gets its own ledger automatically.
+- API facts verified by calls: `response_format` **`json_schema`** works (the docs list only
+  that type; nullable objects via `"type": ["object", "null"]` are accepted). Reasoning cannot
+  be disabled (`"none"` → 400), effort `minimal|low|medium|high|xhigh|max`. **`completion_tokens`
+  includes `reasoning_tokens`** (ping: completion 23 = 13 reasoning + visible). `max_tokens`
+  caps both, so a long reasoning trace can truncate the JSON: `parse_muse` retries once at
+  4000. Prices per 1M: standard $1.25 in / $0.15 cached / $4.25 out; `-contributor` ids
+  $0.10 / $0.002 / $0.20, but Meta may train on those requests. Rate limits are per team.
+- Bugs fixed with the Muse work: the panel hint used to be `sorted(panel)[:400]` (genes A–B
+  only); it is now the on/absent split of ~130 canonical markers (~230 tokens). An empty Muse
+  answer used to be accepted for any query containing "cell"; now only when the rules backend
+  also finds no markers (a generic "all cells").
 - Query schema: `positive` = AND of OR-groups (sum ≥ `min_count`), `negative` groups
   (sum < 1), `region` (marker rule for the reference tissue), `spatial`
   (`boundary | inside | outside | within`, `distance_um`), `sam_prompt` (always "cell").
