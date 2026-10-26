@@ -8,3 +8,4 @@ __pycache__/
 *.ome.tif
 vendor/
 results/sam3_smoke/
+*.egg-info/
