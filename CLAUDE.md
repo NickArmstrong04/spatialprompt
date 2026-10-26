@@ -805,6 +805,15 @@ row), `overlay.png` (cyan region edge, magenta kept, yellow marker-positive not 
 `results/runs/` is gitignored (24 MB per run); `results/figures/demo_overlay_roi01_cd8t_boundary.png`
 is the 1024 px copy. `MUSE_OFFLINE=1` makes the whole CLI zero-spend.
 
+**Web UI (done 2026-10-26, `src/spatialprompt/app.py`, Gradio 6.30 in the `spatial` env,
+optional dep `pip install -e ".[app]"`):** `python -m spatialprompt.app` → http://127.0.0.1:7860.
+Three tabs, no logic of its own: **Query** (ROI, mask set, parser backend, offline switch =
+`MUSE_OFFLINE`; Parse shows Muse's JSON + cost; Run calls `cli.run` → overlay, summary, kept-cell
+table, downloads), **QC agent** (every Muse decision for the ROI from `qc_log_muse.json` with
+confidence/reason/applied; click a row → crop with masks before (cyan) / after (yellow) QC),
+**Benchmarks** (the result CSVs + `results/figures/`). Verified in Chrome: demo query runs in
+~10 s from cached masks, $0 in offline mode. Launches on 127.0.0.1 only.
+
 **Phenotype benchmark** (`bench/phenotype_eval.py`, `results/phenotype_eval.csv`, 5 ROIs ×
 10 queries × 4 mask sets, no API calls: Muse parses from cache, uncached → rules).
 Reference = gate on 10x masks with 10x's own matrix; candidate kept cell matched to the 10x
@@ -813,23 +822,28 @@ cell under its centroid; P/R/F1 of the kept sets. `10x-requant` = 10x masks + ou
 | query (reference cells / ROI) | 10x-requant | Cellpose | SAM | **SAM + Muse QC** |
 |---|---|---|---|---|
 | B cells (266) | 0.99 | 0.88 | 0.87 | **0.88** |
-| CD8+ T cells (71) | 0.98 | 0.82 | 0.83 | **0.83** |
-| CD8+ T cells at the tumor boundary (25) | 0.99 | 0.83 | 0.80 | **0.81** |
-| endothelial cells (111) | 0.98 | 0.78 | 0.76 | **0.78** |
-| macrophages (187) | 0.98 | 0.74 | 0.73 | **0.74** |
 | tumor cells (255) | 0.98 | 0.83 | 0.76 | **0.76** |
+| macrophages (156) | 0.98 | 0.74 | 0.73 | **0.74** |
+| HER2+ tumor cells (99) | 0.98 | 0.78 | 0.69 | **0.68** |
+| CD8+ T cells (71) | 0.98 | 0.82 | 0.83 | **0.83** |
+| endothelial cells (64) | 0.99 | 0.78 | 0.76 | **0.77** |
+| proliferating tumor cells (35) | 0.98 | 0.70 | 0.53 | **0.54** |
+| CD8+ T cells at the tumor boundary (25) | 0.99 | 0.83 | 0.80 | **0.81** |
 
 - Quantification is not the bottleneck (0.98–0.99 on 10x's own masks); the gap is segmentation
   agreement, and it tracks the mask F1 (Cellpose 0.78 > SAM+Muse 0.74 > SAM 0.725). SAM+Muse ≥
-  SAM on every query (+0.00 to +0.02). Precision is ~0.69 for SAM sets vs 0.73 Cellpose; recall
-  0.51 vs 0.67 over all queries (dragged down by the tiny-set rows below).
-- Rows with < 20 reference cells per ROI are not meaningful and are excluded above: "CD8+ T
-  inside the tumor" (1 cell: immune-excluded ROIs), "regulatory T cells near the tumor" (1),
-  "HER2+ tumor cells" (5), "proliferating tumor cells" (15). The last two expose a **schema
-  limit**: one `min_count` applies to every positive group, so Muse's "tumor signature ≥ 3 AND
-  ERBB2 ≥ 3" keeps ~5 cells per ROI. Fix = per-group thresholds (`{"genes": [...], "min_count": n}`
-  in `positive`), which changes the prompt and re-parses the 8 cached queries (~$0.05). **Pending
-  Nick's go-ahead (spend policy).**
+  SAM on 7 of 8 queries (HER2+ −0.006). Immune / stromal queries are close to Cellpose
+  (−0.00 to −0.04); the tumor-nest queries (HER2+, proliferating) lose 0.10–0.16 because that
+  is exactly where SAM under-segments dense epithelium.
+- Rows with ≤ 1 reference cell per ROI are excluded: "CD8+ T inside the tumor" (immune-excluded
+  ROIs) and "regulatory T cells near the tumor".
+- **Schema change (2026-10-26, ~$0.13 of re-parsing):** positive groups are now
+  `{"genes": [...], "min_count": n}` (plain lists still accepted, using the query's
+  `min_count`); `gate.marker_mask` / `group_genes` / `group_min` handle both. First attempt told
+  Muse "≥ 3 genes → min_count 3", which it applied to immune/stromal groups too (macrophages
+  187 → 7 cells); the instruction is now "3 only for the epithelial signature, 1 for everything
+  else". Rules backend emits the same shape and maps `HER2+ / Ki67+ / PD-1+` qualifiers through
+  `GENE_ALIASES`. "HER2+ tumor cells" went from 5 to 99 reference cells per ROI.
 - Figure for the deck not yet made (do it with `bench/make_figures.py` on day 9).
 
 ## Figures and deck (2026-10-21)
@@ -852,7 +866,7 @@ cell under its centroid; P/R/F1 of the kept sets. `10x-requant` = 10x masks + ou
 | 6 | ~~QC agent: detectors as tools, repair loop with box re-prompts~~ **built 2026-10-21 (day 2)** with `RulesPlanner`: F1 0.725 → 0.728, safe on every ROI, missed-detector P 0.55 R 0.27, doublets undetectable from DAPI (QC agent section). ~~**Open:** `MusePlanner` once a key exists~~ **done 2026-10-26**: Muse judges each flag from a crop; roi01 F1 0.769 → 0.778 vs rules 0.770, missed accept-precision 0.48 → 0.68, drops usable (MusePlanner section). | before/after per ROI in `results/qc_check.csv` ✔; `results/qc_check_muse.csv` ✔ |
 | 7 | ~~TissueNet benchmark harness: Cellpose vs SAM 3.1, F1@0.5~~ **done 2026-10-21 (day 2)**: `bench/tissuenet_sam3.py`, SAM 0.690 vs Cellpose 0.854 on 1,324 test images, variants all worse (TissueNet subsection). | table ✔ `results/tissuenet_sam3_test.csv`; bar chart ✔ `results/figures/tissuenet_f1.png` |
 | 8 | ~~Phenotype benchmark on Xenium; end-to-end CLI `query → outputs`~~ **done 2026-10-26**: `spatialprompt-run` (9 s on cached masks, 6 outputs incl. GeoJSON); `bench/phenotype_eval.py` 5 ROIs × 10 queries (SAM+Muse F1 0.74–0.88 vs 10x on real populations; Cellpose +0.02–0.07). Open: per-group `min_count` in the query schema (~$0.05 to re-parse). | ~~one command runs the whole loop on an ROI~~ ✔ |
-| 9 | Demo polish: notebook/CLI walkthrough, figures, timing | demo runs cold in < 10 min |
+| 9 | Demo polish: ~~web UI~~ **done 2026-10-26** (Gradio app, 3 tabs); hybrid seeds tried, not adopted (0.737 vs Cellpose 0.782); query schema per-group thresholds. Still to do: README, deck figures (phenotype + QC tables), cold-start timing, video script. | demo runs cold in < 10 min |
 | 10 | Write-up, video/screens, buffer | submitted |
 
 Cut list if behind: CODEX (drop), per-platform TissueNet breakdown (drop), spatial
@@ -880,6 +894,8 @@ meta_spatialomics/
     gate.py             ✔ # gate: marker logic + spatial relation to a marker-defined region
     muse.py             ✔ # chat(): Meta Model API client, disk cache, per-key spend ledger + hard cap
     qc/                 ✔ # detectors.py, repair.py, agent.py (QCAgent, RulesPlanner), muse_planner.py (MusePlanner)
+    cli.py              ✔ # spatialprompt-run: query -> masks, counts, gate, GeoJSON, overlay
+    app.py              ✔ # Gradio demo UI (python -m spatialprompt.app)
     quantify.py           # transcripts or intensities per mask
     query.py              # Muse Spark: plain English → structured query
     gate.py               # marker logic + spatial filters
@@ -924,15 +940,33 @@ meta_spatialomics/
 6. **Open:** how to treat the work done Oct 20–25 under the "new work only" rule, and which
    track (Indie Developer vs Startups) to enter.
 
-## Parked ideas (do not start until the current design has produced its results)
+## Hybrid seeds: tried 2026-10-26, NOT adopted (`bench/sam3_hybrid.py`, `results/sam3_hybrid.csv`)
 
-- **Hybrid seeds (recorded 2026-10-21):** use Cellpose nuclei as the seeds and keep SAM's
-  box-prompt pass for whole-cell outlines and QC repairs. Evidence it would work: the
-  watershed-from-Cellpose-nuclei ceiling test reached 0.805 whole-cell F1 on Xenium vs
-  10x (SAM seeds → 0.730, Cellpose end-to-end 0.782), and SAM's recall deficit is entirely
-  in the seeds pass. Cost: weakens the "SAM only" story. Try only after the QC agent
-  (day 6) and the phenotype benchmark (day 8) have numbers on the pure-SAM design; it is a
-  one-line change (`seg.expand(rgb, cellpose_nuclei)`) plus a bench row.
+Same `Segmenter.expand` (box prompt, dilate 2 µm) from four seed sets, 5 ROIs, whole-cell
+F1 vs 10x (Cellpose end-to-end reference 0.782):
+
+| seeds | n seeds | cell F1 (P / R) | nucleus F1 | per ROI |
+|---|---|---|---|---|
+| SAM text (control) | 2,275 | 0.725 (0.75 / 0.70) | **0.806** | 0.769 / 0.741 / 0.731 / 0.691 / 0.694 |
+| Cellpose nuclei | 2,352 | 0.759 (0.77 / 0.75) | 0.706 | 0.786 / 0.779 / 0.746 / 0.750 / 0.732 |
+| SAM ∪ Cellpose nuclei not within 1 µm of a SAM seed | 2,525 (+250) | 0.736 (0.72 / 0.75) | 0.806 | 0.775 / 0.751 / 0.736 / 0.713 / 0.706 |
+| same, 2 µm margin | 2,491 (+216) | 0.737 (0.73 / 0.75) | 0.808 | 0.775 / 0.753 / 0.740 / 0.712 / 0.707 |
+
+- Adoption rule was mean > 0.782 and ≥ Cellpose on 4/5 ROIs: fails on every ROI. The union
+  buys +0.05 recall and loses 0.03 precision (the added Cellpose nuclei are partly the dim
+  cells SAM skipped and partly duplicates/debris); net +0.012, about what the Muse QC gives.
+- The useful finding: **Cellpose's own nuclei through SAM's box prompt reach 0.759, below
+  Cellpose's 0.782 from the same nuclei.** So SAM's whole-cell outlines trail Cellpose's by
+  ~0.02 even with identical seeds; the earlier "watershed from Cellpose nuclei = 0.805"
+  ceiling was watershed into the boundary stain, not SAM. The limit is now the outline step,
+  not detection, and no seed trick closes it.
+- Verdict for the write-up: on whole-cell F1 vs 10x we do not pass Cellpose (0.740 with Muse
+  QC vs 0.782); we pass it on Xenium **nucleus** F1 (0.81 vs 0.71) and we are the only one of
+  the three that is promptable and returns phenotyped cells. `cells_sp_hybrid.tif` /
+  `nuclei_sp_hybrid.tif` (2 µm union) stay on disk per ROI; not wired into the CLI. Untested:
+  union + Muse QC (~$0.35/ROI), expected ~0.75.
+
+## Parked ideas (do not start until the current design has produced its results)
 
 ## Sources
 

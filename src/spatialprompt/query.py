@@ -18,6 +18,8 @@ import json
 import re
 import warnings
 
+from spatialprompt.gate import group_genes, group_min
+
 # ----------------------------------------------------------------------------- vocabulary
 
 # cell-type vocabulary for the Xenium Prime 5K breast panel; each entry = AND of OR-groups
@@ -47,15 +49,24 @@ REGIONS: dict[str, dict] = {
     "stroma": dict(name="stroma", positive=[["COL1A1", "COL1A2", "DCN", "LUM"]], min_count=2),
     "vessel": dict(name="vessel", positive=[["PECAM1", "VWF", "CDH5"]], min_count=1),
 }
+# protein / clinical names -> gene symbols for "X+" qualifiers (CD8, CD3 etc. are handled by the cell-type aliases)
+GENE_ALIASES = {"HER2": "ERBB2", "ER": "ESR1", "PR": "PGR", "KI67": "MKI67", "KI-67": "MKI67", "PD-1": "PDCD1", "PD1": "PDCD1",
+                "PD-L1": "CD274", "PDL1": "CD274", "CD45": "PTPRC", "CD20": "MS4A1", "CD4": "CD4", "CD8": "CD8A", "CD3": "CD3E"}
 REGION_ALIASES = {"tumour": "tumor", "tumor nest": "tumor", "cancer": "tumor", "epithelium": "tumor", "stromal": "stroma",
                   "vessels": "vessel", "blood vessels": "vessel", "vasculature": "vessel"}
 
 SCHEMA_DOC = """Return ONLY a JSON object with these keys:
   "label": the query restated briefly,
-  "positive": list of OR-groups (lists of gene symbols); a cell must have >= min_count summed transcripts in EVERY group,
-  "negative": list of OR-groups the cell must have < 1 transcript of (may be empty),
-  "min_count": integer (1 for immune markers, 3 for multi-gene epithelial signatures),
-  "region": null or {"name": str, "positive": [...], "min_count": int} describing the reference tissue region,
+  "positive": list of groups {"genes": [gene symbols], "min_count": int}; a cell must have >= min_count summed
+     transcripts of the group's genes in EVERY group. Use min_count 3 ONLY for the breast epithelial / tumor signature
+     (EPCAM, CDH1, ERBB2, ESR1, GATA3, FOXA1: abundant genes, summed). Every other group uses min_count 1, however many
+     genes it lists: immune lineage groups (CD68/CD163/CSF1R/MRC1, CD3E/CD3D, MS4A1/CD79A), stromal and endothelial
+     groups (PECAM1/CDH5/CLDN5, DCN/LUM/PDGFRA), single markers and qualifiers (FOXP3, ERBB2 for HER2+, MKI67/TOP2A for
+     proliferating). Xenium counts are sparse: a typical marker is >= 1 in only a few % of cells, so a threshold of 3 on
+     an immune or stromal group keeps almost nothing,
+  "negative": list of gene-symbol lists the cell must have < 1 transcript of (may be empty),
+  "min_count": integer default for any group given as a plain list (1),
+  "region": null or {"name": str, "positive": [groups as above], "min_count": int} describing the reference tissue region,
   "spatial": null or {"relation": one of "boundary","inside","outside","within", "distance_um": number}:
      "boundary" = within distance_um of the region edge on either side, "within" = outside the region but within
      distance_um of it ("near", "adjacent"), "inside"/"outside" ignore distance_um. Use 20 unless the query gives a distance,
@@ -74,13 +85,16 @@ KRT7 ERBB2 ESR1 PGR GATA3 FOXA1 AR ELF5 TP63 MKI67 TOP2A PCNA CCNB1 PECAM1 VWF C
 COL1A1 COL1A2 COL3A1 DCN LUM PDGFRA PDGFRB FAP POSTN THY1 ACTA2 TAGLN MYH11 DES CNN1 RGS5 MCAM VIM CXCL13 CXCL9 CXCL10
 CD274 IDO1 HLA-DRA""".split()
 
-_GROUPS = {"type": "array", "items": {"type": "array", "items": {"type": "string"}}}
+_GENES = {"type": "array", "items": {"type": "string"}}
+_LISTS = {"type": "array", "items": _GENES}
+_GROUPS = {"type": "array", "items": {"type": "object", "properties": {"genes": _GENES, "min_count": {"type": "integer"}},
+                                      "required": ["genes", "min_count"], "additionalProperties": False}}
 QUERY_SCHEMA = {
     "type": "object",
     "properties": {
         "label": {"type": "string"},
         "positive": _GROUPS,
-        "negative": _GROUPS,
+        "negative": _LISTS,
         "min_count": {"type": "integer"},
         "region": {"type": ["object", "null"],
                    "properties": {"name": {"type": "string"}, "positive": _GROUPS, "min_count": {"type": "integer"}},
@@ -113,12 +127,18 @@ def parse_rules(text: str) -> dict:
     if best is None:
         m = re.findall(r"\b([A-Z][A-Z0-9]{1,7})\+", text)  # "CD8A+ CD3E+" style
         if m:
-            q["positive"] = [[g] for g in m]
+            q["positive"] = [dict(genes=[g], min_count=1) for g in m]
         else:
             best = "cell"
     if best:
         ct = CELL_TYPES[best]
-        q.update(positive=[list(g) for g in ct["positive"]], negative=[list(g) for g in ct["negative"]], min_count=ct["min_count"])
+        q.update(positive=[dict(genes=list(g), min_count=ct["min_count"]) for g in ct["positive"]],
+                 negative=[list(g) for g in ct["negative"]], min_count=ct["min_count"])
+    for g in re.findall(r"\b([A-Za-z][A-Za-z0-9-]{1,7})\+", text):  # qualifiers next to a cell type, e.g. "FOXP3+ T cells", "HER2+"
+        g = GENE_ALIASES.get(g.upper(), g.upper())
+        # skip if a marker group (min_count 1) already contains it; a signature group (min 3) does not count
+        if best and not any(g in group_genes(p) and group_min(p, 1) == 1 for p in q["positive"]):
+            q["positive"].append(dict(genes=[g], min_count=1))
     for g in re.findall(r"\b([A-Z][A-Z0-9]{1,7})-(?![A-Za-z])", text):  # "EPCAM-" negatives
         q["negative"].append([g])
     # region
@@ -126,10 +146,13 @@ def parse_rules(text: str) -> dict:
     for alias, key in sorted({**REGION_ALIASES, **{k: k for k in REGIONS}}.items(), key=lambda kv: -len(kv[0])):
         if re.search(rf"\b{re.escape(alias)}\b", t):
             region = key; break
+    def region_spec(key: str) -> dict:
+        r = REGIONS[key]
+        return dict(name=r["name"], positive=[dict(genes=list(g), min_count=r["min_count"]) for g in r["positive"]], min_count=r["min_count"])
     if region and best != "tumor cell" or (region and region != "tumor"):
-        q["region"] = dict(REGIONS[region])
+        q["region"] = region_spec(region)
     elif region and best == "tumor cell" and any(w in t for w in ("boundary", "edge", "margin", "border", "interface", "front")):
-        q["region"] = dict(REGIONS[region])
+        q["region"] = region_spec(region)
     # spatial relation
     dist = re.search(r"(\d+(?:\.\d+)?)\s*(?:um|µm|microns?|micrometers?)", t)
     d = float(dist.group(1)) if dist else 20.0
@@ -195,12 +218,13 @@ def validate(q: dict, panel: list[str] | None) -> dict:
     def clean(groups):
         out = []
         for g in groups or []:
-            kept = [x for x in g if x in ps]
-            dropped = [x for x in g if x not in ps]
+            names = group_genes(g)
+            kept = [x for x in names if x in ps]
+            dropped = [x for x in names if x not in ps]
             if dropped:
                 warnings.warn(f"query genes not on panel, dropped: {dropped}")
             if kept:
-                out.append(kept)
+                out.append(dict(genes=kept, min_count=int(g["min_count"])) if isinstance(g, dict) and "min_count" in g else kept)
         return out
     q["positive"] = clean(q.get("positive")); q["negative"] = clean(q.get("negative"))
     if q.get("region"):

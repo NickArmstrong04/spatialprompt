@@ -17,6 +17,9 @@ dependencies = [
     "pyarrow",
 ]
 
+[project.optional-dependencies]
+app = ["gradio>=6"]
+
 [project.scripts]
 spatialprompt-segment = "spatialprompt.segment:main"
 spatialprompt-run = "spatialprompt.cli:main"

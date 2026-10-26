@@ -4,7 +4,8 @@ A query (see query.py) is a plain dict so it can be produced by Muse Spark, writ
 or stored in JSON:
 
     {
-      "positive":  [["CD8A", "CD8B"], ["CD3E", "CD3D"]],   # AND of groups; each group = sum of genes >= min_count
+      "positive":  [{"genes": ["CD8A", "CD8B"], "min_count": 1}, ["CD3E", "CD3D"]],
+                                  # AND of groups; group = {"genes", "min_count"} or a plain list (uses the query's min_count)
       "negative":  [["EPCAM", "CDH1"]],                    # each group's sum must be < neg_max (default 1)
       "min_count": 1,
       "region":    {"name": "tumor", "positive": [["EPCAM","CDH1","ERBB2","ESR1","GATA3","FOXA1"]], "min_count": 3},
@@ -37,14 +38,25 @@ def _group_sum(counts: sparse.spmatrix, genes: np.ndarray, group: list[str]) -> 
     return np.asarray(counts[:, idx].sum(axis=1)).ravel()
 
 
-def marker_mask(counts: sparse.spmatrix, genes: np.ndarray, positive: list[list[str]] | None,
-                negative: list[list[str]] | None = None, min_count: int = 1, neg_max: int = 1) -> np.ndarray:
+def group_genes(grp) -> list[str]:
+    """A group is a list of genes or {"genes": [...], "min_count": n}."""
+    return list(grp.get("genes", [])) if isinstance(grp, dict) else list(grp)
+
+
+def group_min(grp, default: int) -> int:
+    return int(grp.get("min_count", default)) if isinstance(grp, dict) else int(default)
+
+
+def marker_mask(counts: sparse.spmatrix, genes: np.ndarray, positive: list | None,
+                negative: list | None = None, min_count: int = 1, neg_max: int = 1) -> np.ndarray:
+    """positive: AND over groups, each group's gene sum >= its own min_count (or the query's);
+    negative: each group's sum < neg_max."""
     n = counts.shape[0]
     keep = np.ones(n, dtype=bool)
     for grp in positive or []:
-        keep &= _group_sum(counts, genes, grp) >= min_count
+        keep &= _group_sum(counts, genes, group_genes(grp)) >= group_min(grp, min_count)
     for grp in negative or []:
-        keep &= _group_sum(counts, genes, grp) < neg_max
+        keep &= _group_sum(counts, genes, group_genes(grp)) < neg_max
     return keep
 
 

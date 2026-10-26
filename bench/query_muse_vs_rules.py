@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 from spatialprompt import muse
+from spatialprompt.gate import group_genes, group_min
 from spatialprompt.query import parse_query
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,8 +38,10 @@ QUERIES = [
 ]
 
 
-def groups(g) -> str:
-    return " & ".join("(" + "|".join(sorted(x)) + ")" for x in sorted(map(sorted, g or [])))
+def groups(g, default_min: int = 1) -> str:
+    """'(A|B)>=1 & (C|D|E)>=3' for list or {"genes", "min_count"} groups."""
+    parts = [(sorted(group_genes(x)), group_min(x, default_min)) for x in g or []]
+    return " & ".join(f"({'|'.join(names)})>={m}" for names, m in sorted(parts))
 
 
 def main() -> None:
@@ -62,7 +65,7 @@ def main() -> None:
             warnings.simplefilter("always")
             m = parse_query(t, panel, backend="muse")
         row = dict(query=t,
-                   rules_pos=groups(r["positive"]), muse_pos=groups(m["positive"]),
+                   rules_pos=groups(r["positive"], r["min_count"]), muse_pos=groups(m["positive"], m["min_count"]),
                    rules_neg=groups(r["negative"]), muse_neg=groups(m["negative"]),
                    rules_min=r["min_count"], muse_min=m["min_count"],
                    rules_region=(r["region"] or {}).get("name"), muse_region=(m["region"] or {}).get("name"),

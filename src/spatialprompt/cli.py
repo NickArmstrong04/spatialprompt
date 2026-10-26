@@ -35,7 +35,7 @@ from skimage.measure import find_contours
 from skimage.segmentation import find_boundaries
 
 from spatialprompt.composite import make_composite
-from spatialprompt.gate import gate, marker_mask, region_mask
+from spatialprompt.gate import gate, group_genes, marker_mask, region_mask
 from spatialprompt.quantify import marker_table, quantify_transcripts
 from spatialprompt.query import parse_query
 
@@ -191,7 +191,8 @@ def run(roi: Path, query_text: str, masks: str = "sam+muse", fresh: bool = False
         f"{ginfo['distance_um']:g} um; region = {ginfo['n_region']} cells)" if "relation" in ginfo else "") + f" -> {ginfo['n_keep']} cells kept", t)
 
     # per-cell table with the query's genes as columns
-    qgenes = sorted({g for grp in (q.get("positive") or []) + (q.get("negative") or []) + ((q.get("region") or {}).get("positive") or []) for g in grp})
+    qgenes = sorted({g for grp in (q.get("positive") or []) + (q.get("negative") or []) + ((q.get("region") or {}).get("positive") or [])
+                     for g in group_genes(grp)})
     mt = marker_table(counts, genes, qgenes) if qgenes else pd.DataFrame(index=table.index)
     table = pd.concat([table.reset_index(drop=True), mt.reset_index(drop=True)], axis=1)
     x0, y0 = float(meta.get("x0_px", 0)), float(meta.get("y0_px", 0))  # ROI origin in the morphology image
